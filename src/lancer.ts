@@ -200,6 +200,7 @@ import { registerOverchargeSteps } from "./module/flows/overcharge";
 import { registerSystemSteps } from "./module/flows/system";
 import { beginSecondaryStructureFlow, registerStructureSteps } from "./module/flows/structure";
 import { beginCascadeFlow, registerCascadeSteps } from "./module/flows/cascade";
+import { get_pack_id } from "./module/util/doc";
 
 const lp = LANCER.log_prefix;
 
@@ -680,7 +681,7 @@ Hooks.once("ready", async function () {
   // Set up compendium-based statuses icons
   LancerActiveEffect.populateConfig(true);
   Hooks.on("updateCompendium", collection => {
-    if (collection?.metadata?.id == `world.${EntryType.STATUS}`) LancerActiveEffect.populateConfig(true);
+    if (collection?.metadata?.id == get_pack_id(EntryType.STATUS)) LancerActiveEffect.populateConfig(true);
   });
 });
 
