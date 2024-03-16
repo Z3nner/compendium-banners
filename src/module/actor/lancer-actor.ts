@@ -5,10 +5,19 @@ import { AppliedDamage } from "./damage-calc";
 import { SystemData, SystemDataType, SystemTemplates } from "../system-template";
 import { SourceDataType } from "../source-template";
 import { getAutomationOptions } from "../settings";
-import { LancerBOND, LancerFRAME, LancerItem, LancerNPC_CLASS } from "../item/lancer-item";
+import {
+  LancerBOND,
+  LancerFRAME,
+  LancerItem,
+  LancerNPC_CLASS,
+  LancerNPC_FEATURE,
+  LancerNPC_TEMPLATE,
+} from "../item/lancer-item";
 import { LancerActiveEffect } from "../effects/lancer-active-effect";
 import { frameToPath } from "./retrograde-map";
 import { EffectHelper } from "../effects/effector";
+import { insinuate } from "../util/doc";
+import { lookupLID } from "../util/lid";
 import { LoadoutHelper } from "./loadout-util";
 import { StrussHelper } from "./struss-util";
 import { StructureFlow } from "../flows/structure";
@@ -548,6 +557,33 @@ export class LancerActor extends Actor {
     }
   }
 
+  /**
+   * Makes us own (or rather, creates an owned copy of) the provided item if we don't already.
+   * The second return value indicates whether a new copy was made (true), or if we already owned it/it is an actor (false)
+   * Note: this operation also fixes limited to be the full capability of our actor
+   * @param document
+   * @returns The created item, and whether it was created. If it already existed or the document was an actor, the second value is false.
+   */
+  // Makes us own (or rather, creates an owned copy of) the provided item if we don't already.
+  // The second return value indicates whether a new copy was made (true), or if we already owned it/it is an actor (false)
+  // Note: this operation also fixes limited to be the full capability of our actor
+  async quickOwn(document: LancerItem): Promise<[LancerItem, boolean]> {
+    if (document.parent != this) {
+      let results = await insinuate([document], this);
+      for (let newItem of results) {
+        if (newItem.isLimited()) {
+          await newItem.update({
+            "system.uses.value": newItem.system.uses.max,
+          });
+        }
+      }
+      return [results[0], true];
+    } else {
+      // Its already owned
+      return [document, false];
+    }
+  }
+
   /** @inheritdoc
    * Due to the complex effects equipment can have on an actors statistical values, it is necessary to be sure our
    * effects are kept in lockstep as items are created, updated, and deleted
@@ -560,8 +596,31 @@ export class LancerActor extends Actor {
     options: any,
     userId: string
   ) {
+    // When adding an NPC class, find the old class if one exists.
+    let old_class: LancerNPC_CLASS | null = null;
+    // What janky types! If someone has ideas to clean this up, be my guest.
+    let item_docs: LancerItem[] = (documents as (LancerItem | LancerActiveEffect)[]).filter(
+      d => d.documentName === "Item"
+    ) as LancerItem[];
+    if (this.is_npc() && item_docs.some(d => d.is_npc_class())) {
+      old_class = this.items.find(
+        item => item.is_npc_class() && !item_docs.find(doc => item._id === doc._id)
+      ) as LancerNPC_CLASS;
+    }
+
     // @ts-expect-error
     super._onCreateDescendantDocuments(parent, collection, documents, changes, options, userId);
+
+    // If an NPC class or template was added, add and remove the relevant features.
+    if (this.is_npc() && item_docs.some(d => d.is_npc_class() || d.is_npc_template())) {
+      item_docs = item_docs.filter(d => d.is_npc_class() || d.is_npc_template());
+      let new_class = item_docs.find(d => d.is_npc_class()) as LancerNPC_CLASS;
+      if (new_class) this._swapNpcClass(old_class, new_class);
+
+      let new_templates = item_docs.filter(d => d.is_npc_template()) as LancerNPC_TEMPLATE[];
+      new_templates.forEach(t => this._swapNpcClass(null, t));
+    }
+
     if (game.userId == userId) {
       this.effectHelper.propagateEffects(false); // Items / Effects have changed - may need to propagate
     }
@@ -673,6 +732,72 @@ export class LancerActor extends Actor {
       img: replaceDefaultResource(curr_actor, new_frame_path, default_img),
       "prototypeToken.texture.src": replaceDefaultResource(curr_token, new_frame_path, default_img),
     });
+  }
+
+  // Given a list of npc features, return the corresponding entries on this npc
+  findMatchingFeaturesInNpc(feature_ids: string[]): LancerNPC_FEATURE[] {
+    if (!this.is_npc()) return [];
+    let result = [];
+    for (let predicate_lid of feature_ids) {
+      for (let candidate_feature of this.itemTypes.npc_feature as LancerNPC_FEATURE[]) {
+        if (candidate_feature.system.lid == predicate_lid) {
+          result.push(candidate_feature);
+        }
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Internal utility method, intended to be called by _onCreateDescendantDocuments.
+   * Removes features associated with the old class and adds features associated with the new class.
+   * @param old_class The old class which is being removed
+   * @param new_class The new class which is being added
+   */
+  async _swapNpcClass(
+    old_class: LancerNPC_CLASS | null,
+    new_class: LancerNPC_CLASS | LancerNPC_TEMPLATE
+  ): Promise<void> {
+    if (!this.is_npc() || (!new_class.is_npc_class() && !new_class.is_npc_template())) return;
+    // Flag to know if we need to reset stats
+    let needs_refresh = false;
+
+    // If this NPC has an existing class, remove it and all its features
+    if (old_class) {
+      // Find the features from the old class
+      let class_features = this.findMatchingFeaturesInNpc([
+        ...old_class.system.base_features,
+        ...old_class.system.optional_features,
+      ]);
+      if (class_features.length) {
+        // Delete the old class and its features
+        await this._safeDeleteDescendant("Item", [old_class, ...class_features]);
+        needs_refresh = true;
+      }
+    }
+
+    // And add all new features
+    let baseFeatures = (await Promise.all(
+      new_class.system.base_features.map(lid => lookupLID(lid, EntryType.NPC_FEATURE))
+    )) as LancerItem[];
+    await insinuate(
+      baseFeatures.filter(x => x),
+      this
+    );
+    needs_refresh = true;
+    if (new_class.is_npc_class()) {
+      await this.swapFrameImage(new_class);
+    }
+
+    // If a new item was added, fill our hp, stress, and structure to match new maxes
+    if (needs_refresh) {
+      // Update this, to re-populate arrays etc to reflect new item
+      await this.update({
+        "system.hp.value": this.system.hp.max,
+        "system.stress.value": this.system.stress.max,
+        "system.structure.value": this.system.structure.max,
+      });
+    }
   }
 
   // Checks that the provided document is not null, and is a lancer actor
