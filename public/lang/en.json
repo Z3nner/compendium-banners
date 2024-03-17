@@ -229,6 +229,12 @@
         "disabled": "Disabled",
         "inherited": "Inherited"
       }
+    },
+    "tokenConfig": {
+      "manual_token_size": {
+        "label": "Manual Token Sizing",
+        "hint": "Bypass system automation for determining token size"
+      }
     }
   },
   "LANCERINITIATIVE": {
